@@ -2,47 +2,98 @@
 
 var net = require('net');
 
+
+class SocketError extends Error {
+	constructor(isConnected, ip, port) {
+		super();
+	    if (isConnected) {
+			this.message = "Is the RobotArm server running on ip '"+ip+"' and port '"+port+"'";
+		} else {
+			this.message = "You already closed the connection.";
+		}
+	    this.name = 'SocketError';
+	}
+}
+
+class TimeoutError extends Error {
+	constructor() {
+		super();
+		this.name = 'TimeoutError';
+		this.message = "The RobotArm took more than "+this.timeout+" seconds to respond.";
+	}
+}
+
+class ProtocolError extends Error {
+	constructor(response, expected) {
+		super();
+		this.name = 'ProtocolError';
+		this.message = "The RobotArm server responded with '"+response+"' but expected '"+expected+"'.";
+	}
+}
+
+class OutOfRangeError extends Error {
+	constructor() {
+		super();
+		this.name = 'OutOfRangeError';
+		this.message = "Speed must be higher than (or equal to) 0.0 and lower than (or equal to) 1.0.";
+	}
+}
+
+
 class Controller {
 	constructor(ip, port) {
-		ip = ip || "127.0.0.1";
-		port = port || 9876;
+		this.ip = ip || "127.0.0.1";
+		this.port = port || 9876;
 
 		this.isConnected = false;
 
-		this.ip = ip;
-		this.port = port;
+		this.received = false;
+		this.receivedData = "";
 
-		this.initClient();
+		this.initSocket();
 
-		this.connect(ip, port);
+		this.socket.connect(this.port, this.ip, function() {
+			this.isConnected = true;
+		});
+
+		var response = this.WaitForData();
+		this.checkResponse(response, "hello", ["hello"]);
 	}
 
-	initClient() {
+	initSocket() {
 		this.socket = new net.Socket();
-		
+		this.socket.setEncoding('utf8');
+
 		this.socket.on('data', function(data) {
-			console.log(data);
+			// received data from server
+			this.received = true;
+			this.receivedData = data;
+
+			console.log("received: " + data);
+		});
+
+		this.socket.on('connection', function() {
+			// when connected to server
+			console.log('Socket connected.');
 		});
 
 		this.socket.on('close', function() {
-			console.log('Connection closed');
+			// When socket closes
+			console.log('Socket closed.');
 		});
-	}
 
-	connect(ip, port) {
-		try {
-			this.socket.connect(port, ip, function() {
-				this.isConnected = true;
-			});
-		} catch {
-			throw SocketError(true);
-		}
+		this.socket.on('timeout', function(data) {
+			throw new TimeoutError();
+		});
 
+		this.socket.on('error', function(data) {
+			throw new SocketError(this.isConnected, this.ip, this.port, this.first);
+		});
 	}
 
 	checkResponse(response, expected, allowed) {
         var correctResponse = false;
-        response = response.replace("\n", "")
+		response = response.replace("\n", "") || "";
 
         for (var i = 0; i < allowed.length; i++) {
         	if (allowed[i] == response) {
@@ -51,7 +102,7 @@ class Controller {
         	}
         }
         if (!correctResponse) {
-            raise ProtocolError(response, expected);
+            throw new ProtocolError(response, expected);
         }
     }
 
@@ -59,50 +110,69 @@ class Controller {
 		command += "\n";
 		try {
 			this.socket.write(command);
-		} catch {
-			throw SocketError(this.isConnected);
+			this.socket.end();
+		} catch(err) {
+			throw new SocketError(this.isConnected, this.ip, this.port);
 		}
 	}
 
-	moveLeft() {
-		var response = this.send("move left");
+	WaitForData() {
+		while(!this.received) {} // wait for data
 
+		var data = this.receivedData;
+
+		this.received = false;
+		this.receivedData = "";
+
+		return data;
+	}
+
+	moveLeft() {
+		this.send("move left");
+
+		var response = this.WaitForData();
 		this.checkResponse(response, "ok", ["ok", "bye"]);
 	}
 	
 	moveRight() {
-		var response = this.send("move right");
-
+		this.send("move right");
+		
+		var response = this.WaitForData();
 		this.checkResponse(response, "ok", ["ok", "bye"]);
 	}
 	
 	grab() {
-		var response = this.send("grab");
-
+		this.send("grab");
+		
+		var response = this.WaitForData();
 		this.checkResponse(response, "ok", ["ok", "bye"]);
 	}
 	
 	drop() {
-		var response = this.send("drop");
+		this.send("drop");
 
+		var response = this.WaitForData();
 		this.checkResponse(response, "ok", ["ok", "bye"]);
 	}
 	
 	scan() {
-		var response = this.send("scan");
+		this.send("scan");
 
+		var response = this.WaitForData();
 		this.checkResponse(response, "a color", ["red", "blue", "green", "white", "none", "bye"]);
 	}
 	
 	setSpeed(speed) {
-		var response = this.send("speed " +speed);
+		this.send("speed " +speed);
 
+		var response = this.WaitForData();
 		this.checkResponse(response, "ok", ["ok", "bye"]);
 	}
 	
 	loadLevel(name) {
-		var response = this.send("load " + name);
+		this.send("load " + name);
 
+		var response = this.WaitForData();
 		this.checkResponse(response, "ok", ["ok", "nope", "bye"]);
 	}
 
@@ -120,50 +190,15 @@ class Controller {
 	}
 	set speed(speed) {
 		if (speed < 0 || speed > 1) {
-			throw OutOfRangeError();
+			throw new OutOfRangeError();
 		}
 
 		this.speed = speed;
-		setSpeed(speed);
+		this.setSpeed(speed);
 	}
 }
 
 
-class SocketError extends Error {
-	constructor(isConnected) {
-		super(message);
-		if (isConnected) {
-			this.message = "Is the RobotArm server running on ip '"+this.ip+"' and port '"+this.port+"'";
-		} else {
-			this.message = "You already closed the connection.";
-		}
-		this.name = 'SocketError';
-	}
-}
-
-class TimeoutError extends Error {
-	constructor() {
-		super(message);
-		this.message = "The RobotArm took more than "+this.timeout+" seconds to respond.";
-		this.name = 'TimeoutError';
-	}
-}
-
-class ProtocolError extends Error {
-	constructor(response, expected) {
-		super(message);
-		this.message = "The RobotArm server responded with '"+response+"' but expected '"+expected+"'.";
-		this.name = 'ProtocolError';
-	}
-}
-
-class OutOfRangeError extends Error {
-	constructor() {
-		super(message);
-		this.message = "Speed must be higher than (or equal to) 0.0 and lower than (or equal to) 1.0.";
-		this.name = 'OutOfRangeError';
-	}
-}
 
 var Colors = {
 	red: 0,
